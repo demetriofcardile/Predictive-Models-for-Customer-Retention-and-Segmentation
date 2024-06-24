@@ -1,0 +1,1644 @@
+---
+title: "Predictive Models for Customer Retention and Segmentation"
+author: "Demetrio Francesco Cardile"
+date: "2023-03-25"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+################ IMPORTANT################
+# Use the outline to navigate the Rmd file
+```
+
+## Data Analysis for Business 2023
+
+# **Midterm Group Project**
+
+## **Introduction**
+
+We have been provided with two data sets: **Bank Accounts data** and **Purchases data**.
+
+The first one contains information about bank customers, divided in 21 variables (including an identifier and the target variable). It is composed of two files that we will explain later on. The goal is to predict whether a customer will close his credit card account, in that case the bank may try to propose more convenient services and prevent the client from leaving the bank.
+
+The second one contains information about annual customers' purchases from a Portuguese wholesale retailer. It is composed of a single file and contains 8 variables and, by looking only at the quantitative variables, the goal is to find homogeneous groups of customers who have similar purchasing behaviors.
+
+## **Part I: Classification**
+
+### 1. Importing the data set, dealing with missing values and categorical variables
+
+In the following section, we will import the training data set, and we will then perform some basic manipulations such as imputing missing values using R's special value *NA*, and encoding categorical variables as *factors*.
+
+**Notice that the validation set will be generated later on.**
+
+#### 1.0 Installing packages and loading libraries
+
+```{r}
+
+#getwd()
+# Uncomment the following to set your working directory
+#setwd() 
+
+# Uncomment the following to add the required packages
+
+##install.packages(c("tidyverse", "ggplot2", "dplyr", "knitr", "kableExtra", "rlang", "broom", "fastDummies","tidyr","class","caret","pROC","corrplot","lattice","caTools", "ISLR", "xgboost","DiagrammeR","Matrix"))
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(broom)
+library(dummy)
+library(fastDummies)
+library(class)
+library(caret)
+library(pROC)
+library(corrplot)
+library(caTools)
+library(ISLR)
+library(xgboost)
+library(DiagrammeR)
+require(Matrix)
+require(data.table)
+```
+
+#### 1.1 Loading and preprocessing the data set
+
+We know, as per instructions, that categorical features have some missing values denoted by "Unknown": we re-code them using NA, but then we encode them as factors.
+
+```{r}
+
+train_set <- read.csv("./bank_accounts_train.csv",
+                    header = T,
+                    sep = ",",
+                    stringsAsFactors = T)  
+
+# Structure of our dataset, to find cat. variables
+#str(train_set)
+
+# Finding variables with missing data
+levels(train_set$Gender) # no missing data
+levels(train_set$Education_Level)
+levels(train_set$Marital_Status)
+levels(train_set$Card_Category) # no missing data
+
+# Replacing missing values 
+train_set[train_set == "Unknown"] <- NA
+
+# Treating categorical variables as factors
+train_set$Education_Level = droplevels(train_set$Education_Level)
+levels(train_set$Education_Level)
+train_set$Education_Level = addNA(train_set$Education_Level, ifany = TRUE)
+levels(train_set$Education_Level)
+
+train_set$Marital_Status = droplevels(train_set$Marital_Status)
+levels(train_set$Marital_Status)
+train_set$Marital_Status = addNA(train_set$Marital_Status, ifany = TRUE)
+levels(train_set$Marital_Status)
+```
+
+##### Removing duplicates
+
+```{r}
+
+# Check for duplicates!
+anyDuplicated(train_set)
+
+# Deleting the duplicate we found
+train_set <- train_set[-7596,]
+
+# Check for duplicates again!
+anyDuplicated(train_set)
+
+# Deleting the duplicate we found
+train_set <- train_set[-7596,]
+
+# Check for duplicates again!
+anyDuplicated(train_set)
+```
+
+##### Removing outliers
+
+```{r}
+
+# Visualizing the box plots
+for(i in 2:ncol(train_set[,-1])){
+  if (is.factor(train_set[,i]) == FALSE){
+    
+    boxplot(train_set[,i], col = rgb(.7,.7,.7), main = names(train_set)[i], horizontal = TRUE)
+  }}
+```
+
+We notice a large number of outliers.
+
+```{r}
+
+# Extract coefficients
+par(mfrow = c(2,2), mar=c(2,2,4,1))
+
+outlier_row = c()
+for(i in 2:ncol(train_set[,-1])){
+  if (is.factor(train_set[,i]) == FALSE){
+    
+    boxplot(train_set[,i], col = rgb(.7,.7,.7), main = names(train_set)[i], horizontal = TRUE)
+    
+    quartiles = quantile(train_set[,i], probs=c(.25, .75), na.rm = TRUE)
+    
+    IQR = IQR(train_set[,i])
+    
+    Lower = quartiles[1] - 3*IQR 
+    Upper = quartiles[2] + 3*IQR 
+    
+    counter = 0
+    for(row in train_set[,i]){
+      counter = counter + 1
+      if (row < Lower || row > Upper){
+        if (!(counter %in% outlier_row)){
+          outlier_row = append(outlier_row, counter)
+          
+        }}}}}
+
+train_set_wo = train_set[-c(outlier_row),]
+nrow(train_set_wo)
+
+```
+
+The data-frame now consists of 6982 observations, while in the past it used to consist of 7595 observations. We have sacrificed a small proportion of data to get more accurate results. Moreover, we opted for a different approach to remove outliers. In fact, the traditional approach regards as *outlier* any observation falling above the interval (*first quartile - 1.5IQR, third quartile + 1.5IQR*). Instead, we multiply the IQR by 3, thus expanding the interval and including observations that would otherwise be labelled as outliers.
+
+Now we visualize the new box plots.
+
+```{r}
+
+for(i in 2:ncol(train_set_wo[,-1])){
+  if (is.factor(train_set_wo[,i]) == FALSE){
+    
+    boxplot(train_set_wo[,i], col = rgb(.7,.7,.7), main = names(train_set_wo)[i], horizontal = TRUE)
+  }}
+```
+
+### 2. Describing the data, measuring and visualizing the most relevant relations.
+
+In the following section we will perform an exploratory data analysis, providing a brief description of the data set first, and then highlighting some key relations among variables.
+
+#### 2.1 Description of the data set
+
+To begin with, the first step is conducting an analysis about the data set we have been provided with.
+
+```{r}
+
+# Structure of our dataset
+str(train_set)
+```
+
+```{r}
+
+# Summary of our dataset
+summary(train_set)
+```
+
+More specifically, the *summary()* function helps making a more precise idea about:
+
+1.  The distribution of numerical variables, which may help in detecting outliers.
+2.  The frequency distribution of categorical variables.
+3.  The presence of *NA* values and their magnitude with respect to the data set.
+
+------------------------------------------------------------------------
+
+##### Correlation matrix
+
+```{r}
+
+num_vars <- select_if(train_set, is.numeric) # selects only the numerical variables
+cor_matrix <- cor(num_vars) # calculates the correlation matrix
+# cor_matrix # Careful: long output
+```
+
+One notable correlation is between **`Customer_Age`** and **`Months_on_book`**, which have a positive correlation coefficient of 0.79. This suggests that the older a customer is, the longer they tend to stay with the bank. Another positive correlation is between **`Total_Relationship_Count`** and **`Dependent_count`**, with a coefficient of 0.44. This suggests that customers with more dependents tend to have more relationships with the bank.
+
+On the other hand, **`Total_Trans_Amt`** has a strong negative correlation with **`Total_Relationship_Count`** and **`Total_Trans_Ct`** with correlation coefficients of -0.35 and -0.24, respectively. This suggests that customers who have more relationships with the bank and conduct more transactions tend to spend less per transaction.
+
+Another interesting finding is the negative correlation between **`Income`** and **`Total_Relationship_Count`**, with a coefficient of -0.08. This suggests that customers with higher incomes tend to have fewer relationships with the bank.
+
+Furthermore, there is a positive correlation between **`Credit_Limit`** and **`Avg_Open_To_Buy`**, with a coefficient of 0.99. This indicates that these variables are highly correlated, and there is a strong linear relationship between them.
+
+Finally, it is worth noting the negative correlation between **`Closed_Account`** and **`Total_Relationship_Count`**, with a coefficient of -0.16. This suggests that customers who have closed accounts tend to have fewer relationships with the bank.
+
+Overall, the correlation matrix provides valuable insights into the relationships between the different variables in the data set and can guide further analysis and modeling efforts.
+
+------------------------------------------------------------------------
+
+```{r}
+
+number_size = 0.3 # adjust this value to your visualization
+
+corrplot(cor_matrix, method = "color", type = "upper", order = "hclust", 
+         addCoef.col = "black", tl.col = "black", tl.srt = 45, 
+         number.cex = number_size,tl.cex = 0.4,
+         col = colorRampPalette(c("red","orange","blue"))(100))
+```
+
+#### 2.2 Distribution of variables of interest
+
+```{r}
+
+# Let's use the raw data set for this part of the analysis,
+# so that we may gain insights from outliers and missing values that have been removed
+
+train_set_raw <- read.csv("./bank_accounts_train.csv",
+                    header = T,
+                    sep = ",",
+                    stringsAsFactors = T)  
+```
+
+As anticipated earlier, in this section we will focus on the distributions of some variables of interest. More specifically, we will focus on the following variables' distributions:
+
+-   **Customer_Age**, to assess the age-range of customers, which may turn to be crucial for the bank's business and marketing strategies.
+-   **Gender**, since it would be interesting to compare the number of female customers and the one of male customers, thus to check if the data set is balanced/unbalanced with respect to this metric.
+-   **Education_Level**, to explore the "average" education background of customers.
+-   **Card_Category**, to find out the most adopted card typology.
+-   **Months_on_nook**, thus to understand something more about the bank's ability to deal with customers. In fact, an average reduced period of relationship may be an alarm signal for the bank.
+-   **Total_Trans_Amt**, to assess the latest order of magnitude of transactions from customers (this variable is referred to last 12 months).
+-   **Total_Trans_Ct**, to assess the latest frequency of transactions from customers (once again, this variable is referred to last 12 months).
+-   **Income**, to investigate the target audience of the bank.
+-   **Closed_Account**, to find out if the data set is balanced or not. Moreover, since it is the target variable, it is always suggested to explore its distribution.
+
+```{r}
+
+# Boxplot to show the distribution of variable "Age"
+boxplot(train_set_raw$Customer_Age, main = "Customer Age Boxplot", xlab = "Age", col = "blue")
+```
+
+As one may notice from the box plot, customers of the bank are middle-aged ones. This may turn out to be particularly crucial for the bank's business and marketing decisions. Moreover, spot the presence of a few outliers.
+
+```{r}
+
+# Barplot to show the distribution of variable "Gender"
+barplot(table(train_set_raw$Gender), main = "Gender Distribution", xlab = "Gender", ylab = "Frequency", col = c("pink", "blue"))
+
+```
+
+As one may notice, the data set is pretty balanced with respect to gender distribution.
+
+```{r}
+
+# Pie-chart to show the distribution of variable "Education_Level"
+
+education_counts <- table(train_set_raw$Education_Level)# frequency table
+
+pie(education_counts, labels = names(education_counts), main = "Pie Chart of Education Level", col = rainbow(length(education_counts)))
+```
+
+As one may notice, most of the account holders are Graduate qualified, but still a relevant percentage is made of uneducated costumers.
+
+```{r}
+
+# Barplot to show the distribution of variable "Card_Category"
+
+barplot(table(train_set_raw$Card_Category), main = "Card Category Distribution", xlab = "Card Category", ylab = "Frequency", col = c("blue", "green", "orange", "red"))
+```
+
+As one may notice, the data set is very unbalanced with respect to Card Category distribution, since almost all the customers have a Blue category. This may arise a crucial question for the bank: is the latter missing some opportunities?
+
+```{r}
+
+# Boxplot for the distribution of variable "Months_on_book"
+boxplot(train_set_raw$Months_on_book, main = "Months on Book Boxplot", xlab = "Months on Book", col = "blue")
+```
+
+As one may notice, the periods of relation between customers and the bank are not that long. This may alert the bank, since maybe it would need to improve customers' loyalty. Moreover, once again spot the presence of some outliers.
+
+```{r}
+
+# Histogram to show the distribution of variable "Total_Trans_Amt"
+boxplot(train_set_raw$Total_Trans_Amt, main = "Total Trans Amt Boxplot", xlab = "Total Trans Amt", col = "blue")
+```
+
+As one may notice, most of the customers record a low transaction amount in the last 12 months. Moreover, the box plot clearly shows a massive presence of outliers.
+
+```{r}
+
+# Boxplot to show the distribution of variable "Total_Trans_Ct"
+boxplot(train_set_raw$Total_Trans_Ct, main = "Total Trans Ct Boxplot", xlab = "Total Trans Ct", col = "blue")
+```
+
+As one may spot, in the last 12 months it was recorded a pretty high frequency of low total transaction count, and a regularly low frequency for higher total transaction count.
+
+```{r}
+
+# Boxplot for the distribution of variable "Income"
+boxplot(train_set_raw$Income, main = "Income Boxplot", xlab = "Income", col = "blue")
+```
+
+The box plot upon shows that bank's customers may generally belong to middle-class. In particular, notice the lack of outliers.
+
+```{r}
+
+# Barplot of the target variable: "Closed_Account"
+barplot(table(train_set_raw$Closed_Account), main="Target Variable Distribution", xlab = "Closed Account", col="blue")
+```
+
+From the bar plot above one may notice that the data set is clearly unbalanced, since most of the customers did not close the bank account.
+
+#### 2.3 Key relations among variables
+
+As anticipated previously, in this section we will discuss some interesting relations between variables. More specifically, we would like to pose the attention on the following pairwise relations:
+
+1.  Gender vs Income (categorical - numerical), thus to investigate if higher income is usually associated to Males or not.
+2.  Customer_Age vs Closed_Account (numerical - categorical), thus to investigate if an increase in age is generally associated to an increase in loyalty.
+
+*Income vs Gender*
+
+To represent such relation, one may use either a box plot or a violin plot. We will opt for the first.
+
+```{r}
+
+# Boxplot to show the relation between Gender and Income.
+boxplot(train_set_raw$Income ~ train_set_raw$Gender, 
+        xlab = "Gender",
+        ylab = "Income",
+        main = "Income by Gender")
+```
+
+The comparison above shows that there is apparently no discrimination between men and women based on the corresponding Income. In particular, the median seems to be the same in the two groups, the first quartile for women is approximately on the same level of men, and the upper quartile is slightly higher for women than for men.
+
+*Customer Age vs Closed Account*
+
+To represent such relation, one may choose among a box plot, a violin plot and a histogram overlay. For the sake of coherence, being adopted from the beginning of our analysis for graphical representations, we will use once again a box plot.
+
+```{r}
+
+# Boxplot to show the relation between Customer Age and Closed Account
+boxplot(train_set_raw$Customer_Age ~ train_set_raw$Closed_Account, 
+        xlab = "Closed Account",
+        ylab = "Customer Age",
+        main = "Customer Age by Closed Account")
+```
+
+From the two box plots above, one can spot that age does not influence the tendency of the consumers to close the account or to keep it, since both upper and lower quartile coincide, and even because the median seems to be practically the same.
+
+#### 2.4 Correlation among variables and further insights
+
+In the following section, we will conclude our brief exploratory data analysis, focusing on further insights on some groups of variables of interest.
+
+*GGPlot on ternary relation: Education_Level, Marital_Status, Card_Category*
+
+```{r}
+
+# GGPlot 
+GGally::ggpairs(train_set_raw, columns = 5:7)
+```
+
+*GGPlot on ternary relation: Total_Amt_Chng_Q4_Q1, Total_Trans_Amt, Total_Trans_Ct*
+
+```{r}
+
+#GGPlot
+GGally::ggpairs(train_set, columns = 15:17)
+```
+
+*GGPlot on ternary relation: Avg_Utilization_Ratio, Income, Closed_Account*
+
+```{r}
+
+#GGPlot
+GGally::ggpairs(train_set, columns = 19:21)
+```
+
+### 3. Fitting a Logistic Regression
+
+We are asked to fit a Logistic Regression Model to estimate the effect of Income and Gender on the probability of closing an account and plot the fitted logistic curves. Does Income have a different effect for males and females? Interpret the coefficients and comment the results.
+
+We will start with the unabridged **train_set**.
+
+#### 3.1 Building and exploring a Generalized Linear Model
+
+```{r}
+
+mod = glm(train_set$Closed_Account~train_set$Income+train_set$Gender, family = binomial(link = "logit"))
+summary(mod)
+```
+
+The logistic regression model estimated the effect of Income and Gender on the probability of closing an account. The coefficients indicate the change in the log odds of closing an account for a one-unit change in the predictor variable while holding the other predictor variable constant.
+
+The intercept term of -1.595 implies that when Income and Gender are both equal to zero, the log odds of closing an account is -1.595.
+
+The coefficient estimate for Income is 0.0004317. However, it is not statistically significant (p-value = 0.493918) which means that there is insufficient evidence to conclude that Income has a significant effect on the log odds of closing an account, after accounting for the effect of Gender.
+
+The coefficient estimate for Gender is -0.2236025, which is statistically significant (p-value = 0.000405). This suggests that males are less likely to close their accounts than females, after controlling for the effect of Income. Specifically, for a one-unit increase in Gender (i.e., changing from female to male), the log odds of closing an account decreases by 0.223.
+
+The residual deviance of 6671.9 indicates that the model fits the data reasonably well. However, the AIC value of 6677.9 suggests that there may be room for improvement in the model fit.
+
+In terms of the fitted logistic curves, the plot shows a linear relationship between Income and the log odds of closing an account for both males and females. However, the curves are parallel, indicating that the effect of Income is the same for both genders.
+
+When we fit a logistic regression model with multiple predictor variables, we can plot the predicted probabilities of the outcome variable (in this case, the probability of closing an account) for different levels of each predictor variable, holding all other variables constant. In this case, we have two predictor variables: Income and Gender.
+
+If the curves for different levels of Income are parallel, it means that the effect of Income on the probability of closing an account is the same for all levels of Gender. In other words, the effect of Income on the probability of closing an account is not influenced by Gender.
+
+In contrast, if the curves for different levels of Income are not parallel, it means that the effect of Income on the probability of closing an account is different for different levels of Gender. In other words, the effect of Income on the probability of closing an account is influenced by Gender.
+
+#### 3.2 Building a Generalized Linear Model without outliers
+
+```{r}
+
+mod2 = glm(train_set_wo$Closed_Account~train_set_wo$Income+train_set_wo$Gender, 
+          family = binomial(link = "logit"),
+          data = train_set_wo)
+```
+
+#### 3.3 Plotting the curve for the first Generalized Linear Model
+
+```{r}
+
+beta0 <- summary(mod)$coefficients[1, 1]
+beta1 <- summary(mod)$coefficients[2, 1]
+beta2 <- summary(mod)$coefficients[3, 1]
+
+
+logistic_predictions1 = predict(mod,train_set, type="response")
+
+# Plot logistic curve
+ggplot(train_set, aes(x = Income, y = logistic_predictions1, color = Gender)) +
+  geom_line(size = 0.6) +
+  geom_smooth(method = "glm", method.args = list(family = binomial(link = "logit")), se = TRUE) +
+  labs(title = "Effect of Income and Gender on Account Closure Probability",
+       x = "Income",
+       y = "Account Closure Probability",
+       color = "Gender") +
+  scale_color_discrete(labels = c("Female", "Male")) +
+  theme_minimal()
+```
+
+#### 3.4 Plotting the curve for the second Generalized Linear Model
+
+```{r}
+
+beta0_m2 <- summary(mod2)$coefficients[1, 1]
+beta1_m2 <- summary(mod2)$coefficients[2, 1]
+beta2_m2 <- summary(mod2)$coefficients[3, 1]
+
+logistic_predictions2 = predict(mod2,train_set_wo, type="response")
+
+# Plot logistic curves
+ggplot(train_set_wo, aes(x = Income, y = logistic_predictions2 , color = Gender)) +
+  geom_line(size = 0.6) +
+  geom_smooth(method = "glm", method.args = list(family = binomial(link = "logit")), se = TRUE) +
+  labs(title = "Effect of Income and Gender on Account Closure Probability",
+       x = "Income",
+       y = "Account Closure Probability",
+       color = "Gender") +
+  scale_color_discrete(labels = c("Female", "Male")) +
+  theme_minimal()
+```
+
+#### 3.5 Interpretation (based on the first Generalized Linear Model)
+
+```{r}
+
+# Interpret coefficients
+cat("Odds ratio for Income:", exp(beta1), "\n")
+cat("Odds ratio for Gender (Male vs Female):", exp(beta2), "\n")
+```
+
+The odds ratio for Income is 1.000432, which means that for a one-unit increase in Income, the odds of closing an account increase by a factor of 1.000432, holding Gender constant. Since the p-value for Income is not statistically significant (p = 0.494), we cannot conclude that Income has a significant effect on the probability of closing an account.
+
+The odds ratio for Gender (Male vs Female) is 0.799, which means that the odds of closing an account for males are 0.799 times the odds of closing an account for females, holding Income constant. Since the p-value for Gender is statistically significant (p = 0.0004), we can conclude that Gender has a significant effect on the probability of closing an account. Specifically, the odds of closing an account for males are significantly lower than the odds of closing an account for females.
+
+### 4. k-NN
+
+Considering only the continuous predictors **Total_Trans_Amt** and **Total_Trans_Ct**, we are asked to choose the best number of neighbors k to use in k-NN by evaluating the predictive performance of the model on the validation set; then we will plot the scores obtained as a function of k.
+
+#### 4.0 Training and validation sets 80/20 split
+
+```{r}
+
+# Split data into training and validation sets
+set.seed(123)
+data = train_set_wo
+train_idx <- sample(1:nrow(data), size = 0.8 * nrow(data), replace = FALSE)
+train_set_part <- data[train_idx, ] #creating training set
+val_set <- data[-train_idx, ] #creating validation set
+
+# Select predictors
+x_train <- train_set_part[, c("Total_Trans_Amt", "Total_Trans_Ct")]
+x_val <- val_set[, c("Total_Trans_Amt", "Total_Trans_Ct")]
+
+# Training set
+x_train_sc <- scale(x_train)
+
+#extracting the mean from training set
+train_m <- apply(x_train,
+                 MARGIN = 2,
+                 FUN = mean)
+
+#extracting the standard deviation from training set
+train_s <- apply(x_train,
+                 MARGIN = 2,
+                 FUN = sd)
+
+#scaling validation set with respect to meand and sd of training set
+x_val_sc <- scale(x_val,
+                  center = train_m,
+                  scale = train_s)
+
+# Extract target variable
+y_train <- train_set_part$Closed_Account
+y_val <- val_set$Closed_Account
+
+```
+
+#### 4.1 Choosing k based on accuracy
+
+##### Visualization
+
+```{r}
+
+# Create a vector of odd values for k
+k_vec <- seq(1, 80, 1)
+
+# Create a vector to store the accuracy scores
+acc_scores <- rep(0, length(k_vec))
+
+# Loop through the k values, train the k-NN model, and compute accuracy on the validation set
+for (i in 1:length(k_vec)) {
+  # Train the k-NN model on the training data
+  knn_fit <- knn(x_train_sc, x_val_sc, y_train, k = k_vec[i])
+  
+  # Compute the accuracy score on the validation set
+  acc_scores[i] <- mean(knn_fit == y_val)
+}
+
+# Plot the accuracy scores as a function of k
+plot(k_vec, acc_scores, type = "b", pch = 19, xlab = "k", ylab = "Accuracy", col="blue", main = "Accuracy as a function of k")
+```
+
+##### Print
+
+```{r}
+
+# Create a data frame to store the accuracy scores
+acc_df <- data.frame(k = k_vec, accuracy = NA)
+
+# Loop through the k values, train the k-NN model, and compute accuracy on the validation set
+for (i in 1:length(k_vec)) {
+  # Train the k-NN model on the training data
+  knn_fit <- knn(x_train_sc, x_val_sc, y_train, k = k_vec[i])
+  
+  # Compute the accuracy score on the validation set
+  acc_df$accuracy[i] <- mean(knn_fit == y_val)
+}
+
+# Print the accuracy scores as a table
+cat(sprintf("%-10s %-10s\n", "k", "accuracy"))
+cat(sprintf("%-10s %-10s\n", "--", "--------"))
+for (i in 1:nrow(acc_df)) {
+  cat(sprintf("%-10d %-10.3f\n", acc_df$k[i], acc_df$accuracy[i]))
+}
+```
+
+##### Classification results
+
+```{r}
+
+table(train_set_part$Closed_Account)
+table(val_set$Closed_Account)
+```
+
+#### 4.2 k-NN: hyper-parameter tuning
+
+```{r}
+
+# CAREFUL: LONG OUTPUT
+
+## kNN implementation ##
+
+# The only parameter we have to tune using this model is k.
+# Common approach: try different values and pick the best one.
+
+# Grid of values for k
+k_grid <- 1:80
+
+# Model fitting (& MISC/AUC calculation) for each value of k
+k_results <- sapply(k_grid,
+                    FUN = function (kk) {
+                      
+                      # Model fitting
+                      kk_fit_train <- knn(train = x_train,
+                                          test = x_train,
+                                          cl = y_train,
+                                          k = kk,
+                                          prob = TRUE)
+                      kk_fit_val <- knn(train = x_train,
+                                        test = x_val,
+                                        cl = y_train,
+                                        k = kk,
+                                        prob = TRUE)
+                      
+                      # Misclassification error
+                      kk_misc_in <- 1 - mean(y_train == kk_fit_train)
+                      kk_misc_out <- 1 - mean(y_val == kk_fit_val)
+                      
+                      # AUC
+                      # The probabilities returned by knn() are those of the 
+                      # winning class. We have to transform them such that they
+                      # refer to the same class (e.g., 'yes').
+                      kk_probyes_in <- ifelse(kk_fit_train == "1",
+                                              attr(kk_fit_train, "prob"), 
+                                              1 - attr(kk_fit_train, "prob"))
+                      kk_probyes_out <- ifelse(kk_fit_val == "1", 
+                                               attr(kk_fit_val, "prob"), 
+                                               1 - attr(kk_fit_val, "prob"))
+                      kk_auc_in <- pROC::auc(y_train == "1", kk_probyes_in)
+                      kk_auc_out <- pROC::auc(y_val == "1", kk_probyes_out)
+                      
+                      # Results
+                      return(c(kk_misc_in,
+                               kk_misc_out,
+                               kk_auc_in,
+                               kk_auc_out))
+                      
+                    })
+
+
+# Evaluation metrics on the grid
+misc_in <- k_results[1, ]
+misc_out <- k_results[2, ]
+auc_in <- k_results[3, ]
+auc_out <- k_results[4, ]
+```
+
+The goal of hyper-parameter tuning is to find the optimal value of the hyper-parameter, in this case, the number of nearest neighbors (k), that results in the best model performance.
+
+The code starts by defining a grid of values for k, ranging from 1 to 80. For each value of k in the grid, the code fits a KNN model using the **`knn()`** function from the **`class`** package. The model is fitted to the training data **`x_train`** with corresponding class labels **`y_train`**, and the fitted model is then used to make predictions on both the training data and the validation data **`x_val`** with corresponding class labels **`y_val`**.
+
+For each value of k, the code computes the misclassification error (1 - accuracy) and the area under the receiver operating characteristic curve (AUC) for both the training and validation data. The misclassification error measures the proportion of incorrectly classified instances, while the AUC is a metric that measures the quality of the model's output probabilities.
+
+The code stores the results for each value of k in a matrix **`k_results`**. The matrix has four rows, corresponding to the misclassification error for the training data, misclassification error for the validation data, AUC for the training data, and AUC for the validation data. The columns correspond to each value of k in the grid.
+
+Finally, the code extracts the misclassification error and AUC for the training and validation data from the **`k_results`** matrix and stores them in separate vectors **`misc_in`**, **`misc_out`**, **`auc_in`**, and **`auc_out`**. These vectors can be used to visualize the performance of the KNN model for different values of k and to choose the optimal value of k based on the model's performance on the validation data.
+
+#### 4.3 MISC performance
+
+```{r}
+
+# RUN THE WHOLE CHUNK
+
+# Plot the performance (MISC)
+k_grid <- sort(k_grid)
+
+plot(k_grid,
+     misc_in,
+     type = "b",
+     lwd = 2,
+     ylim = c(0, 0.3), 
+     main = "MISC train VS test",
+     ylab = "MISC",
+     xlab = 'k')
+lines(k_grid, 
+      misc_out, 
+      type = "b",
+      lwd = 2,
+      col = 2,
+      lty = 1)
+legend("topright",
+       c("Train", "Validation"),
+       col = c(1, 2),
+       lty = c(1),
+       bty = "n", 
+       pch = 21)
+
+# Best k using MISC
+k_best_misc <- k_grid[which.min(misc_out)]
+abline(v = k_best_misc, 
+       col = 4,
+       lwd = 2)
+best_misc <- min(misc_out)
+```
+
+Based on MISC, the best k is 11.
+
+#### 4.4 AUC performance
+
+```{r}
+
+# RUN THE WHOLE CHUNK
+
+# Plot the performance (AUC)
+plot(k_grid,
+     auc_in, 
+     type = "b",  
+     lwd = 2, 
+     ylim = c(0.5, 1),
+     main = "AUC train VS test",
+     ylab = "AUC",
+     xlab = 'k')
+lines(k_grid, 
+      auc_out,
+      type = "b",
+      lwd = 2,
+      col = 2,
+      lty = 1)
+legend("topright",
+       c("Train", "Validation"),
+       col = c(1,2),
+       lty = c(1),
+       bty = "n", 
+       pch = 21)
+
+# Best k using AUC
+k_best_auc <- k_grid[which.max(auc_out)]
+abline(v = k_best_auc, 
+       col = 4,
+       lwd = 2)
+best_auc <- max(auc_out)
+
+# Using AUC, we are very close to the largest value we have tried for k.
+# Perhaps we could try larger values. 
+```
+
+Based on AUC, the best k is 12, thus considering that it is close to the best k for MISC error, we use ***k=12***.
+
+### 5. Best model
+
+#### 5.0 Creating a training set
+
+To start, let's split our training set into a training and validation set. We will use the training set to train our models and the validation set to select the best one based on the AUC metric. We will then use the selected model to make predictions on the test set.
+
+```{r}
+
+#creating a training set that doesn't contain id
+train_set_wid <- train_set_wo[,2:21]
+
+#creating a validation set that doesn't contain id TO BE VERIFIED
+```
+
+#### 5.1 Logistic Regression with all predictors
+
+```{r}
+
+#create a model using all the variables
+mod = glm(train_set_wid$Closed_Account~ ., 
+          family = binomial(link = "logit"),
+          data = train_set_wid) 
+
+summary(mod)
+```
+
+The output is from a logistic regression model that aims to predict whether a customer has closed their account or not based on various independent variables. The summary of the model shows the coefficients for each of the independent variables, along with their standard errors, z-values, and p-values.
+
+The intercept term has a significant positive estimate, indicating that the log-odds of closing an account is high when all other variables are held constant.
+
+The following variables are also significant predictors of whether a customer closed their account:
+
+-   **Gender**: Male customers are less likely to close their account compared to female customers (negative estimate).
+
+-   **Dependent count**: Customers with more dependents are more likely to close their account (positive estimate).
+
+-   **Marital status:** Customers who are married are less likely to close their account compared to customers who are single (negative estimate).
+
+-   **Card category**: Customers who have a platinum or silver card are more likely to close their account compared to customers who have a standard card (positive estimates).
+
+-   **Total relationship count**: Customers with fewer relationships are more likely to close their account (negative estimate).
+
+-   **Months inactive 12 months**: Customers who have been inactive for a longer period are more likely to close their account (positive estimate).
+
+-   **Contacts count 12 months**: Customers who have had more contact with the bank in the past 12 months are less likely to close their account (positive estimate).
+
+-   **Total revolving balance**: Customers with a higher revolving balance are less likely to close their account (negative estimate).
+
+-   **Total transaction amount**: Customers with a higher transaction amount are less likely to close their account (positive estimate).
+
+-   **Total transaction count**: Customers with a higher transaction count are more likely to close their account (negative estimate).
+
+-   **Total count change Q4 to Q1**: Customers who have had a decrease in the number of transactions are more likely to close their account (negative estimate).
+
+-   **Income**: Customers with higher income are less likely to close their account (positive estimate).
+
+Some variables, such as customer age and education level, are not significant predictors of account closure (based on their p-values).
+
+The model also shows the deviance residuals, which are a measure of how well the model fits the data. The null deviance is the deviance of a model with only the intercept, while the residual deviance is the deviance of the fitted model. The difference between the null and residual deviance indicates how much the model has improved by including the independent variables. In this case, the residual deviance is significantly smaller than the null deviance, indicating that the model fits the data reasonably well.
+
+Finally, the AIC (Akaike information criterion) is a measure of the model's goodness of fit, with lower values indicating a better fit. In this case, the AIC is relatively low, suggesting that the model provides a good fit to the data.
+
+------------------------------------------------------------------------
+
+```{r}
+
+# CAREFUL: LONG OUTPUT!
+
+# Forward
+logit_fit_aic1 <- step(glm(train_set_wid$Closed_Account ~ 1,
+                           family = "binomial",
+                           data = train_set_wid),
+                       scope = formula(mod),
+                       direction = "forward")
+# Backward
+logit_fit_aic2 <- step(mod,
+                       direction = "backward") 
+
+# Both directions
+logit_fit_aic3 <- step(mod,
+                       direction = "both")
+
+sort(coefficients(logit_fit_aic1))
+sort(coefficients(logit_fit_aic2))
+sort(coefficients(logit_fit_aic3))
+```
+
+------------------------------------------------------------------------
+
+```{r}
+# Comparison based on deviance test (Chi-square test) for nested models
+anova(mod, logit_fit_aic1, test = "Chisq") 
+```
+
+The p-value for the Chi-square test is 0.314, which is greater than the standard significance level of 0.05, indicating that there is no significant evidence to reject the null hypothesis that the reduced model (Model 2) is not significantly worse than the full model (Model 1). In other words, the step-wise regression did not result in a significant loss of information, and the reduced model is adequate for predicting the outcome variable.
+
+It's worth noting that step-wise regression can be problematic and may not always result in the best model, so the selection of variables should be based on sound theoretical or empirical justifications. Additionally, the use of AIC as a criterion for model selection may not be appropriate in some cases, and alternative criteria such as Bayesian information criterion (BIC) or cross-validation should be considered as well.
+
+```{r}
+
+# CAREFUL: LONG OUTPUT!
+
+# Forward
+logit_fit_bic1 <- step(glm(train_set_wid$Closed_Account ~ 1,
+                           family = "binomial",
+                           data = train_set_wid),
+                       scope = formula(mod),
+                       direction = "forward",
+                       k = log(nrow(train_set_wid)))
+
+# Backward
+logit_fit_bic2 <- step(mod,
+                       direction = "backward",
+                       k = log(nrow(train_set_wid))) 
+
+# Both directions
+logit_fit_bic3 <- step(mod,
+                       direction = "both",
+                       k = log(nrow(train_set_wid)))
+
+sort(coefficients(logit_fit_bic1))
+sort(coefficients(logit_fit_bic2))
+sort(coefficients(logit_fit_bic3))
+```
+
+------------------------------------------------------------------------
+
+```{r}
+
+anova(mod, logit_fit_bic1, test = "Chisq") 
+```
+
+The Deviance of Model 1 is 3368.3 with 6953 degrees of freedom, while the Deviance of Model 2 is 3387.7 with 6968 degrees of freedom. Model 2 has a higher Deviance, indicating that it has a poorer fit compared to Model 1.
+
+However, the difference in Deviance between the two models is only 19.444, which is not large enough to reject the null hypothesis that the simpler Model 2 is not significantly worse than Model 1 based on the BIC criterion. The p-value for the Chi-square test is 0.1943, which is greater than the standard significance level of 0.05, supporting the conclusion that the reduced model is adequate for predicting the outcome variable based on the BIC criterion as well.
+
+```{r}
+
+tt <- 0.5
+
+# We can use this threshold to turn estimated probabilities into labels
+pred_aic <- as.factor(ifelse(logit_fit_aic1$fitted.values > tt, 1, 0))
+pred_bic <- as.factor(ifelse(logit_fit_bic1$fitted.values > tt, 1, 0))
+
+
+# Confusion matrix
+table(pred_aic, train_set_wid$Closed_Account)
+table(pred_bic, train_set_wid$Closed_Account)
+```
+
+------------------------------------------------------------------------
+
+##### Visualizing the AUC score
+
+```{r}
+roc_aic <- pROC::roc(train_set_wid$Closed_Account,
+                     logit_fit_aic1$fitted.values,
+                     plot = TRUE,
+                     col = "midnightblue",
+                     lwd = 3,
+                     auc.polygon = T,
+                     auc.polygon.col = "lightblue",
+                     print.auc = T)
+roc_bic <- pROC::roc(train_set_wid$Closed_Account,
+                     logit_fit_bic1$fitted.values,
+                     plot = TRUE,
+                     col = "midnightblue",
+                     lwd = 3,
+                     auc.polygon = T,
+                     auc.polygon.col = "lightblue",
+                     print.auc = T)
+
+# AUC scores
+roc_aic$auc
+roc_bic$auc
+```
+
+In this case, the AUC score for BIC is 0.928, which is close to 1, indicating that the model has a strong ability to distinguish between positive and negative cases. This suggests that the model is a good fit for the data and can be useful in predicting whether an account will be closed or not. However, it is important to note that the AUC is just one measure of model performance and should be interpreted in conjunction with other metrics, such as accuracy, precision, recall, and F1-score, to get a more complete picture of the model's performance.
+
+```{r}
+test_set = read.csv("bank_accounts_test.csv",
+                  header = T,
+                  sep = ",",
+                  stringsAsFactors = T)
+
+#substitute the "Unknown"
+test_set[test_set == "Unknown"] <- NA
+
+test_set$Education_Level = droplevels(test_set$Education_Level) #treat them as factors
+levels(test_set$Education_Level)
+test_set$Education_Level = addNA(test_set$Education_Level, ifany = TRUE)
+levels(test_set$Education_Level)
+
+
+test_set$Marital_Status = droplevels(test_set$Marital_Status)
+levels(test_set$Marital_Status)
+test_set$Marital_Status = addNA(test_set$Marital_Status, ifany = TRUE)
+levels(test_set$Marital_Status)
+
+summary(test_set)
+```
+
+------------------------------------------------------------------------
+
+```{r}
+
+prob_out_aic <- predict(logit_fit_aic1,
+                        newdata = test_set,
+                        type = "response")
+pred_out_aic <- as.factor(ifelse(prob_out_aic > tt, 1, 0))
+prob_out_bic <- predict(logit_fit_bic1,
+                        newdata = test_set,
+                        type = "response")
+pred_out_bic <- as.factor(ifelse(prob_out_bic > tt, 1, 0))
+```
+
+```{r}
+
+## Validation set ##
+
+# Predictions for the observations in the validation set
+prob_out_aic <- predict(logit_fit_aic1,
+                        newdata = test_set,
+                        type = "response")
+pred_out_aic <- as.factor(ifelse(prob_out_aic > tt, "yes", "no"))
+prob_out_bic <- predict(logit_fit_bic1,
+                        newdata = test_set,
+                        type = "response")
+pred_out_bic <- as.factor(ifelse(prob_out_bic > tt, "yes", "no"))
+```
+
+#### 5.2 Logistic Regression with feature engineering
+
+In this section, we will try to build a model performing feature engineering. More specifically, we will use three predictors:
+
+-   Total_Trans_Amt: total transaction amount (Last 12 months)
+
+-   Total_Trans_Ct: total transaction count (last 12 months)
+
+-   Trans_Amt_Per_Ct: ratio of "Total_Trans_Amt" over "Total_Trans_Ct" that would provide information on the average transaction size.
+
+**We decided not to include this model in the report because the AUC score was identical to the last one (0.928).**
+
+#### 5.3 K-fold cross validation and Logistic Regression
+
+```{r}
+
+### LOGISTIC REGRESSION
+
+tr_contr = trainControl(method  = "cv",
+                        number  = 10,
+                        classProbs = TRUE, summaryFunction = twoClassSummary)
+
+train_set_2 = train_set_wid
+train_set_2$Closed_Account <- as.factor(train_set_wid$Closed_Account) 
+is.factor(train_set_2$Closed_Account)
+train_set_2$Closed_Account <- make.names(train_set_2$Closed_Account, unique = FALSE, allow_ = TRUE)
+# Train logistic regression model using train function
+logit_fit <- train(Closed_Account ~ .,
+                   method = "glm",
+                   trControl = tr_contr,
+                   metric = "",
+                   data = train_set_2)
+
+# Print the results
+logit_fit
+
+# Plot ROC curve
+roc_curve <- roc(train_set_wid$Closed_Account, predict(logit_fit, type = "prob")[, 2])
+plot(roc_curve, col = "blue", main = "ROC Curve")
+```
+
+We set up a train control object using 10-fold cross-validation and enabling the calculation of class probabilities. The "Closed_Account" column in "train_set_2" is converted to a factor variable using the "as.factor" function and is given a proper name trough "make.names". The logistic regression model is then trained using all variables as predictors and the ROC curve is plotted.
+
+#### 5.4 K-fold cross validation and k-NN
+
+```{r}
+
+k_values <- seq(1, 50, by = 2) # Creating a sequence of odd numbers from 1 to 50
+knn_cv <- train(Closed_Account ~ .,
+                method     = "knn",
+                tuneGrid   = data.frame(k = k_values), # Using only odd values of k
+                trControl  = tr_contr,
+                metric     = "ROC",
+                data       = train_set_2)
+
+knn_cv
+
+roc_curve <- roc(train_set_wid$Closed_Account, predict(knn_cv, type = "prob")[, 2])
+plot(roc_curve, col = "blue", main = "ROC Curve")
+```
+
+#### 5.5 XGBoost (BEST MODEL)
+
+Package source: <https://xgboost.readthedocs.io/en/stable/R-package/xgboostPresentation.html>
+
+##### Encoding categorical variables
+
+```{r}
+
+dmy <- dummyVars(" ~ .", data = train_set_wid)
+train_set_encoded <- data.frame(predict(dmy, newdata = train_set_wid))
+train_set_encoded
+```
+
+##### Loading and preprocessing the test set
+
+```{r}
+
+# Load test data set
+test_set = read.csv("bank_accounts_test.csv",
+                    header = T,
+                    sep = ",",
+                    stringsAsFactors = T)
+
+#substitute the "Unknown"
+test_set[test_set == "Unknown"] <- NA
+
+test_set$Education_Level = droplevels(test_set$Education_Level) #treat them as factors
+levels(test_set$Education_Level)
+test_set$Education_Level = addNA(test_set$Education_Level, ifany = TRUE)
+levels(test_set$Education_Level)
+
+
+test_set$Marital_Status = droplevels(test_set$Marital_Status)
+levels(test_set$Marital_Status)
+test_set$Marital_Status = addNA(test_set$Marital_Status, ifany = TRUE)
+levels(test_set$Marital_Status)
+
+# Excluding the identifier
+test_set <- test_set[,2:20]
+
+# Encode categorical variables using same encoding used for training set
+dmy2 <- dummyVars(" ~ .", data = test_set)
+test_set_encoded <- data.frame(predict(dmy2, newdata = test_set))
+```
+
+##### Selecting parameters for the model
+
+```{r}
+
+# Set the parameters for the XGBoost model
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  gamma = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = 1
+)
+
+# Convert the training data to a DMatrix object
+dtrain <- xgb.DMatrix(data = as.matrix(train_set_encoded[, -ncol(train_set_encoded)]), 
+                      label = train_set_encoded$Closed_Account)
+
+set.seed(42)
+# Train the model with cross-validation
+cv_results <- xgb.cv(data = dtrain, 
+                     params = params, 
+                     nfold = 15, 
+                     nrounds = 150, 
+                     verbose = FALSE, # set this to TRUE if you want to see the process
+                     early_stopping_rounds = 10,
+                     prediction = T)
+
+# Extract the best number of boosting rounds from the cross-validation results
+best.iter <- cv_results$best_iteration
+best.metric <- cv_results$evaluation_log$test_auc_mean[best.iter]
+best.metric
+
+# Convert the test data to a DMatrix object
+dtest <- xgb.DMatrix(data = as.matrix(test_set_encoded[, -ncol(test_set_encoded)]))
+```
+
+```{r}
+
+# Compute the AUC score and print it to the console
+roc_data <- pROC::roc(response = train_set_encoded$Closed_Account,
+                      predictor = cv_results$pred,
+                      levels=c(0, 1))
+
+# Plot the ROC curve using the pROC package
+plot(roc_data,
+     lwd=1.5) 
+```
+
+##### Writing the predicted probabilities
+
+```{r}
+
+# Convert test data to matrix format
+test_matrix <- as.matrix(test_set_encoded)
+
+# Train the final model using all the data
+finalmodel <- xgb.train(data = dtrain, params = params, nrounds = best.iter)
+
+# Predict the probabilities of the outcome variable using the trained XGBoost model
+pred_prob <- predict(finalmodel, newdata = test_matrix, ntree_limit = best.iter)
+
+# Write the predicted probabilities to a csv file
+write.csv(pred_prob, file = "prob_def.csv", row.names = FALSE)
+```
+
+### 6. Cost Matrix
+
+Building a cost matrix is an important step in binary classification because it explicitly considers the trade-off between different types of classification errors and choose the classification threshold that maximizes the expected profit or minimizes the expected cost.
+
+The cost matrix instructions can be interpreted in one of the following ways:
+
+    NO OFFER -\> NO CLOSURE: -50
+
+    NO OFFER -\> CLOSURE: 50
+
+    OFFER -\> NO CLOSURE -20
+
+    OFFER -\> CLOSURE: 0
+
+    OFFER-\> CLOSURE: -20
+
+    NO OFFER -\> CLOSURE: 50
+
+    NO OFFER -\> NO CLOSURE: -50
+
+    OFFER -\> NO CLOSURE: 0
+
+We will use the first interpretation.
+
+This cost matrix shows that the bank is willing to incur a cost of 50 for each customer who closes their account, and a gain of 50 for each customer who stays with the bank without any offer. However, the bank is willing to offer a highly competitive interest rate to customers who are predicted to leave, and in that case, the gain is reduced to 20 for each customer. The cost matrix suggests that the bank is more concerned about customers leaving than about offering competitive rates, as the cost associated with losing a customer is higher than the gain from retaining a customer. It also highlights that offering the competitive rate has a cost associated with it, which should be taken into consideration while choosing the threshold for classification.
+
+To choose the optimal classification threshold, we can use metrics such as the receiver operating characteristic (ROC) curve and the area under the curve (AUC) as well as precision, recall, and F1-score. These metrics help evaluate the model's performance in terms of false positives, false negatives, true positives, and true negatives. Depending on the cost-benefit analysis, we can choose a threshold that maximizes profit or minimizes cost.
+
+```{r}
+# Cost matrix
+
+# Create cost matrix
+cost_matrix <- matrix(c(0, -20, 
+                        50, -50), 
+                      ncol = 2,
+                      dimnames = list(c("Close", "No close"),
+                                      c("Offer", "Do not offer ")))
+
+# Display cost matrix
+cost_matrix
+```
+
+------------------------------------------------------------------------
+
+The models' performance using the cost matrix is done by picking a threshold, compute the confusion matrix and multiply it by the cost.
+
+```{r}
+
+confmat_aic <- table(pred_aic, train_set_wo$Closed_Account)
+sum(cost_matrix * confmat_aic)
+confmat_bic <- table(pred_bic, train_set_wo$Closed_Account)
+sum(cost_matrix * confmat_bic)
+# BIC yields a lower cost = larger gain.
+```
+
+The threshold is really important, in fact, by trying different thresholds we can find the one that gives the best final outcome (lowest cost = largest gain). This means that we can use the overall cost not only to choose between models, but also to choose the best threshold.
+
+```{r}
+
+set.seed(123)
+data = train_set_wid
+train_idx <- sample(1:nrow(data), size = 0.8 * nrow(data), replace = FALSE)
+train_set_part <- data[train_idx, ] #creating training set
+val_set <- data[-train_idx, ] #creating validation set
+#val_set_enc <- as.matrix(val_set_enc)
+
+# Create cost matrix
+cost_matrix <- matrix(c(0, -20, 
+                        50, -50), 
+                      ncol = 2,
+                      dimnames = list(c("Close", "No close"),
+                                      c("Offer", "Do not offer ")))
+
+# Set up a vector of thresholds to try
+thresholds <- seq(0.1, 0.9, 0.05)
+
+# Create vectors to store the results
+costs_aic <- numeric(length(thresholds))
+costs_bic <- numeric(length(thresholds))
+
+# Loop over the thresholds
+for (i in seq_along(thresholds)) {
+  # Apply the AIC model with the current threshold
+  pred_aic <- ifelse(predict(logit_fit_bic1, newdata = val_set, type = "response") > thresholds[i], "No close", "Close")
+  # Compute the confusion matrix and cost
+  confmat_aic <- table(pred_aic, val_set$Closed_Account)
+  costs_aic[i] <- sum(cost_matrix * confmat_aic)
+  
+  # Apply the BIC model with the current threshold
+  pred_bic <- ifelse(predict(logit_fit_bic1, newdata = val_set, type = "response") > thresholds[i], "No close", "Close")
+  # Compute the confusion matrix and cost
+  confmat_bic <- table(pred_bic, val_set$Closed_Account)
+  costs_bic[i] <- sum(cost_matrix * confmat_bic)
+}
+
+# Find the threshold that gives the lowest cost for the BIC model
+best_threshold <- thresholds[which.min(costs_bic)]
+best_cost <- costs_bic[which.min(costs_bic)]
+
+# Print the results
+cat("Best threshold:", best_threshold, "\n")
+cat("Best cost:", best_cost, "\n")
+```
+
+## Part II: Clustering
+
+### *K-means*
+
+#### 7.0 Installing packages and loading libraries
+
+Before starting to implement clustering models, it is necessary - as usual - to load packages and libraries.
+
+```{r}
+
+# Installing packages and libraries
+#install.packages("factoextra")
+library(factoextra)
+if (!requireNamespace("cluster", quietly = TRUE)) {
+  ##install.packages("cluster")
+}
+library(cluster)
+library(ISLR2)
+library(MASS)
+library(mvtnorm)
+library(ggpubr)
+library(mclust)
+```
+
+In the following section, we will group customers into clusters using k-means and hierarchical clustering methods. First, we will focus on k-means algorithm.
+
+#### 7.1 Loading the data set "purchases.csv"
+
+```{r}
+
+# Loading the dataset
+purchases_raw <- read.csv("purchases.csv",
+                    header = T,
+                    sep = ",",
+                    stringsAsFactors = F)
+```
+
+Now, we will use the R **`set.seed()`** function to specify a random number generation seed for reproducibility.
+
+```{r}
+
+# Random generation seed
+set.seed(23)
+```
+
+Notice that we are required to use numerical features only. By exploring the dataset "purchases.csv", it turns out that the first two attributes, namely "Channel" and "Region" are categorical ones. Hence, we will exclude them from the data set.
+
+```{r}
+
+# Deleting the first two columns
+purchases <- purchases_raw[,3:8]
+```
+
+#### 7.2 Scaling the data
+
+The reason for scaling is that clustering algorithms are based on distance metrics, and variables with large differences in scale can dominate the distance measure. This can result in clustering solutions that are biased towards variables with larger scales, and variables with smaller scales may not contribute much to the clustering results.
+
+At this point, a crucial question arises: how to scale data? More specifically, we will focus on two possible methods, namely the simple *scale()* function and the *log()* scaling function.
+
+The first makes more sense when you have multiple variables that you are considering across different scales. eg, one var is of order of magnitude 100 while another is of order of magnitude 1000000.
+
+The second one, instead, is more suggested in the case of skewed distribution of data (recalling what discussed in class).
+
+Hence, to decide which scaling function to use, we will plot the distribution of each variable.
+
+```{r}
+
+# Get the names of the variables in the dataset
+variable_names <- names(purchases)
+
+# Loop through each variable and generate a histogram
+for (i in 1:length(variable_names)) {
+  hist(purchases[,i], main = variable_names[i], col = "blue", xlab = variable_names[i])
+}
+```
+
+As clearly shown through the histograms above, all variables have a skewed distribution. Hence, we will opt for a logarithmic scaling function.
+
+```{r}
+
+# Scaling the data
+purchases_sc <- log(purchases)
+```
+
+To verify whether the logarithmic transformation applied to the initial variables, plot once again the distribution of variables of the scaled data set.
+
+```{r}
+
+# Visualizing scaled distribution
+
+# Loop through each variable and generate a histogram
+for (i in 1:length(variable_names)) {
+  hist(purchases_sc[,i], main = variable_names[i], col = "blue", xlab = variable_names[i])
+}
+```
+
+As one may notice, the logarithmic scaling applied correctly.
+
+#### 7.3 Elbow rule to determine *k*
+
+At this point, one crucial question arises: which is the value of *k* one should use? In simpler words, how many neighbors *k* should be used? To solve such problem, we use the elbow rule. The elbow method is a technique used to determine the optimal number of clusters in k-means clustering. It is called the elbow method because the optimal number of clusters often occurs at the "elbow" of a curve that plots the number of clusters against the within-cluster sum of squares (WSS).
+
+```{r}
+
+# Plotting the elbow curve
+fviz_nbclust(purchases_sc, kmeans, method = "wss")+ labs(subtitle = "WSS - Elbow method")
+```
+
+By looking at the plot above, one notices that the last relevant values of *k*, meaning the last values for which there is still a good value for WSS, are namely *k=2,* and *k=3*.
+
+Anyway, to have a more complete view on which value of *k* to choose to build the model, we will use a further method to explain cluster quality: Average Silhouette.
+
+#### 7.4 Average Silhouette plot to assess cluster quality
+
+To recall theory, The average silhouette plot is a graphical tool used to evaluate the quality of a clustering solution. It displays the average silhouette coefficient for each cluster, which measures how well an object fits into its assigned cluster compared to other clusters. The plot can help us assess the clustering quality by examining the distribution of silhouette coefficients across clusters. Higher values indicate better clustering results, while negative or widely varying silhouette coefficients may suggest that the clustering solution is not optimal.
+
+```{r}
+
+# Plotting the Avg. Silhouette plot
+fviz_nbclust(purchases_sc, kmeans, method = "silhouette")+ labs(subtitle = "Silhouette method")
+```
+
+Recalling that one should choose as value for *k* the one to which corresponds the maximum *average silhouette width*, it is evident that one should pick a *k=2*.
+
+Notice that this confirms what we have already found out while plotting the elbow curve, but this approach shows only which is the **best value** for *k*.
+
+Anyway, the Avg, Silhouette plot shows that for a value of *k=3*, the corresponding value of *average silhouette width* declines of course, but still may be relevant to be considered.
+
+Hence, combining the two visualization methods (namely the *elbow curve* and the *average silhouette*), we consider as relevant values for *k* the value 2 and the value 3.
+
+#### 7.5 Building the model
+
+In the following section, we will build a *k-means model* using the aforementioned values of *k*.
+
+*Building the model with k = 2*
+
+```{r}
+
+# Model with k = 2
+km_2 = kmeans(purchases_sc, 2, nstart = 1, iter.max = 1e2)
+```
+
+This line performs k-means clustering using 2 clusters (**`k = 2`**). The **`nstart`** parameter specifies the number of initial centroids to use, and **`iter.max`** specifies the maximum number of iterations allowed.
+
+*Computing silhouette coefficients*
+
+```{r}
+
+# Silhouette coefficients
+sil_coeff2 = silhouette(km_2$cluster, dist(purchases_sc))
+```
+
+This line calculates the silhouette coefficients for each observation in the clustering solution generated in the previous step.
+
+*Visualizing silhouette coefficients*
+
+```{r}
+
+# Visualization of silhouette coefficients
+fviz_silhouette(sil_coeff2)
+```
+
+This line generates a visualization of the silhouette coefficients using the **`fviz_silhouette()`** function from the **`factoextra`** package. The function takes the output of the **`silhouette()`** function as input and generates a plot of the average silhouette width for each cluster, as well as the individual silhouette widths for each observation.
+
+*Building the model with k = 3*
+
+```{r}
+
+# Model with k = 3
+km_3 = kmeans(purchases_sc, 3, nstart = 1, iter.max = 1e2)
+```
+
+*Computing silhouette coefficients*
+
+```{r}
+
+# Silhouette coefficients
+sil_coeff3 = silhouette(km_3$cluster, dist(purchases_sc))
+```
+
+*Visualizing silhouette coefficients*
+
+```{r}
+
+# Visualization of silhouette coefficients
+fviz_silhouette(sil_coeff3)
+```
+
+#### 7.6 Total WSS (Within-cluster Sum of Squares)
+
+WSS (Within-cluster Sum of Squares) is the total sum of squares of the distances between each data point and its assigned centroid in k-means clustering. The WSS measures the total variation within each cluster, or the total amount of distance that each point is from its centroid.
+
+*WSS for model with k = 2*
+
+```{r}
+
+# WSS (k=2)
+km_2$tot.withinss
+```
+
+*WSS for model with k = 3*
+
+```{r}
+
+# WSS (k=3)
+km_3$tot.withinss
+```
+
+A single value of WSS by itself doesn't provide much information or context!
+
+The WSS value is typically used to evaluate the quality of a clustering solution in comparison to other clustering solutions. In general, lower WSS values are better because they indicate that the data points are more tightly clustered around their respective centroids, and the clusters are well separated from each other.
+
+So, if you have multiple k-means clustering solutions for the same data set with different numbers of clusters, you can compare the WSS values for each solution to determine which one is the best fit.
+
+Hence, since WSS for *k=3* is lower than WSS for *k=2*, one should opt for a k-means model with ***k=3***.
+
+### *Hierarchical Clustering*
+
+In the following section, we will provide the implementation of a hierarchical clustering model to group customers into clusters.
+
+**Building the model**
+
+As a first step, we will build several models using different linkage methods. They all assume Euclidian distance by default.
+
+```{r}
+
+# building models
+hc_complete = hclust(dist(purchases_sc), method = "complete")
+hc_single = hclust(dist(purchases_sc), method = "single")
+hc_ward = hclust(dist(purchases_sc), method = "ward.D2")
+hc_average = hclust(dist(purchases_sc), method = "average")
+hc_trans = hclust(as.dist( 1 - cor(t(purchases_sc))), method="average")
+```
+
+The last line of code performs hierarchical clustering using the average linkage method (**`method="average"`**) on a matrix of pairwise dissimilarities derived from the correlation matrix of the transpose of the log-transformed data matrix (**`cor(t(purchases_sc))`**).
+
+**Visualizing the dendrogram**
+
+The following lines of code first create a dendrogram plot for a hierarchical clustering object **`hc_complete`** using the **`plot()`** function. The x-axis of the plot is labeled "X" using the **`xlab`** parameter. Additionally, the **`abline()`** function is used to add a horizontal line at a certain height on the y-axis of the dendrogram plot. In simpler words, **`abline()`** can be used to visualize where to cut the dendrogram to form a specific number of clusters.
+
+```{r}
+
+# dendrogram for hc_complete
+plot(hc_complete, xlab="X") 
+abline(h=14, col=2)
+```
+
+```{r}
+
+# dendrogram for hc_single
+plot(hc_single, xlab="X") 
+abline(h=4.5, col=2)
+```
+
+```{r}
+
+# dendrogram for hc_ward
+plot(hc_ward, xlab="X") 
+abline(h=40, col=2)
+```
+
+```{r}
+
+# dendrogram for hc_average
+plot(hc_average, xlab="X") 
+abline(h=9, col=2)
+```
+
+```{r}
+
+# dendrogram for hc_trans
+plot(hc_trans, xlab="X") 
+abline(h=0.6, col=2)
+```
+
+**Cutting the dendrogram for a specific number of clusters k**
+
+The following code is generating hierarchical clustering dendrograms with different linkage methods using the "fviz_dend" function and specifying that there should be 3 clusters (k=3). It also adds the title (argument "main") to the dendrogram plot.
+
+```{r}
+
+#Creating dendograms for a specific number of clusters k
+n1 = fviz_dend(hc_complete, k=3, main="complete") 
+n2 = fviz_dend(hc_single, k=4, main="single") 
+n3 = fviz_dend(hc_ward, k=3, main="ward.D2") 
+n4 = fviz_dend(hc_average, k=4, main="average")
+n5 = fviz_dend(hc_trans, k=4, main="average")
+
+n1
+n2
+n3
+n4
+n5
+```
+
+In the following cell, we will add a new column to the data set *purchases_sc*. This new column contains the number of cluster in that dendrogram. More specifically, in each row there will be one further attribute storing the cluster associated to that row.
+
+The "cutree" function is assigning each observation in the "purchases_sc" dataset to one of the 3 clusters generated by the hierarchical clustering algorithm. The cluster assignments are stored in a new column in the "purchases_sc" dataset, with a factor variable type.
+
+```{r}
+
+#In each of these columns will be stored the cluster associated for each rows 
+purchases_sc$dend_1 = as.factor(cutree(hc_complete, k =3))
+purchases_sc$dend_2 = as.factor(cutree(hc_single, k =4))
+purchases_sc$dend_3 = as.factor(cutree(hc_ward, k =3))
+purchases_sc$dend_4 = as.factor(cutree(hc_average, k =4))
+purchases_sc$dend_5 = as.factor(cutree(hc_trans, k=4))
+```
+
+```{r}
+
+#The "table" function is creating a frequency table of the values in the "Channel" column of the "purchases_sc" dataset.
+lab_count = table(purchases_sc$Channel)
+```
+
+In the following section we will create a new data frame in which rows will be ordered by the channel's categories.
+
+### 8. Verifying if units in the same business sector tend to have similar spending profile
+
+#### 8.0 Creating a new data frame
+
+As anticipated previously, we will create a data frame in which rows will be ordered by the channel's categories. Since we need the variable *Channel*, we will use the initial dataset.
+
+```{r}
+
+# New data frame
+channel = purchases_raw[order(purchases_raw$Channel),]
+channel
+```
+
+#### 8.1 Computing distances between numerical variables
+
+```{r}
+
+# Computing distances
+channel_dist = dist(scale(channel[,3:8]))
+```
+
+Now, we will compute hierarchical clustering and cut the tree into *k* clusters (*k* decided via dendrogram inspection).
+
+```{r}
+
+# Cutting dendrograms
+c1 = hcut(channel_dist, k = 2, hc_method = "complete")
+c2 = hcut(channel_dist, k = 3, hc_method = "single")
+c3 = hcut(channel_dist, k = 2, hc_method = "ward.D2")
+c4 = hcut(channel_dist, k = 3, hc_method = "average")
+```
+
+At this point, we draw dendrograms.
+
+```{r}
+
+# Drawing dendrograms
+fviz_dend(c1)
+fviz_dend(c2)
+fviz_dend(c3)
+fviz_dend(c4)
+```
+
+Thanks to the different colors, the dendrograms above clearly show where one should cut the tree in order to obtain the right number of clusters. For instance, in the first dendrogram one should cut at height 20 to get two clusters, since a cut at any level below 20 may lead to three clusters or even more. In the second dendrogram, one should cut at height 6 (approximately) to have three clusters. In the third dendrogram, one should cut at height 30 to get two clusters. Finally, in the last dendrogram, one should cut at height 10 (approximately) to get the right number of clusters.
+
+```{r}
+table(c1$cluster, purchases_raw$Channel)
+table(c2$cluster, purchases_raw$Channel)
+table(c3$cluster, purchases_raw$Channel)
+table(c4$cluster, purchases_raw$Channel)
+
+#table with how many of the two channel is in each cluster with old clusters done by hierarchical
+table(purchases_sc$dend_1, purchases_raw$Channel)
+table(purchases_sc$dend_2, purchases_raw$Channel)
+table(purchases_sc$dend_3, purchases_raw$Channel)
+table(purchases_sc$dend_4, purchases_raw$Channel)
+table(purchases_sc$dend_5, purchases_raw$Channel)
+
+#table with how many of the two channel is in each cluster with old clusters done by kmeans
+table(km_2$cluster,purchases_raw$Channel)
+table(km_3$cluster,purchases_raw$Channel)
+```
